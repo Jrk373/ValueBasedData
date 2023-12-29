@@ -1,0 +1,168 @@
+---
+title: "VBPQR_TrendReport"
+author: 
+  name: "John Ryan Kivela, MA"
+  email: "Ryan.Kivela@narbha.org"
+  affiliation: "The Alliance ACO"
+editor: visual
+date: today
+date-format: long
+format:
+  html:
+    theme: pulse
+    embed-resources: true
+    toc: true
+    toc-depth: 6
+    code-fold: false
+    footnotes-hover: true
+---
+
+# Abstract
+
+This report aggregates all VBP QR files into one master file that will be used to assess baseline and performance levels across measures and providers.
+
+```{r}
+#| label: Setup
+#| include: false
+#| echo: false
+#| warning: false
+#| error: false
+
+# Load Libraries
+library(tidyverse)
+library(purrr)
+library(readxl)
+
+# Create provider shortnames based on TIN
+# Create a data frame called ProviderShortnames
+ProviderShortnames <- 
+  data.frame(
+  TIN = c("86-0206928", "86-0207499", "86-0214457", "86-0215065", "86-0223720", "86-0250938", "86-0290033", "86-0473221", "94-2880847"),
+  ProviderShortname = c("PH", "SHG", "MMHC", "CPIH", "TGC", "LCBHC", "SBHS", "EHS", "CBI")
+  )
+```
+
+# Data Discovery
+
+This data is collected from the BCBSAZ Health Choice health plan on a monthly basis. A separate file is received per provider, per month. The source and quality of this data is already well documented in the VBP Validation for Follow Up After Hospitalization and Anti-depressant Medication Management, so we will not re-iterate it here.
+
+Prior to importing to the model, each VBP Quality Roster data file is copied to a Master Folder containing all Quality Roster reports for all months of the measurement year, for all of the providers.
+
+## Import Data files
+
+These are excel files and require importing of a specific sheet. The name of the sheet has varied in name and location within the file, sometimes appearing a literal sheet, and sometimes appearing only in the data model view. 
+
+```{r}
+# Function to read Excel files from a folder and its subfolders
+read_excel_sheets_as_separate_df <- function(path) {
+  # Get list of files in the current directory
+  files <- list.files(path = path, full.names = TRUE, recursive = TRUE)
+  
+  # Initialize an empty list to store data frames
+  all_dfs <- list()
+  
+  # Loop through each Excel file
+  for (file in files) {
+    if (grepl("\\.xlsx$|\\.xls$", file, ignore.case = TRUE)) {
+      file_name <- basename(file)
+      sheet_names <- excel_sheets(file)
+      
+      # Read each sheet and store as a separate data frame
+      for (sheet in sheet_names) {
+        df_name <- paste0(file_name, "_", sheet)
+        data <- readxl::read_excel(file, sheet = sheet)
+        assign(df_name, data)
+        all_dfs[[df_name]] <- get(df_name)
+      }
+    }
+  }
+  
+  return(all_dfs)
+}
+
+# Replace './data/Master' with your folder path
+folder_path <- "./data/VBPReports/Master/2022"
+
+# Call the function to read Excel files and sheets as separate data frames
+result_separate_df <- read_excel_sheets_as_separate_df(folder_path)
+
+# Filter list items that end in "_Detail"
+filtered_list <- result_separate_df[sapply(names(result_separate_df), function(x) grepl("_Detail$", x))]
+
+# Bind tibbles/data frames into one single data frame
+combined_df <- bind_rows(filtered_list)
+
+# Filter out rows with NA in the second column
+filtered_combined_df <- 
+  combined_df |> 
+  filter(!is.na(`...2`))
+
+# Extract values from the first row of filtered_combined_df
+first_row_values <- unlist(filtered_combined_df[1,])
+
+# Store the values in a list called DetailSheetNames
+DetailSheetNames <- as.list(first_row_values)
+
+# Remove rows where the value in the first column is "LOB"
+filtered_combined_df <- 
+  filtered_combined_df |> 
+  filter(`Health Choice Arizona (HCA) – Arizona Medicaid` != "LOB")
+
+# Convert DetailSheetNames to character vector
+DetailSheetNames <- as.character(DetailSheetNames)
+
+# Rename columns using values from DetailSheetNames
+names(filtered_combined_df) <- DetailSheetNames
+
+# Merge filtered_combined_df with ProviderShortnames based on TIN column
+merged_df <- merge(filtered_combined_df, ProviderShortnames, by.x = "Health Home TIN", by.y = "TIN", all.x = TRUE)
+
+# Convert excel dates to a yyyy-mm-dd format
+merged_df$`Report Period` <- as.Date(as.numeric(merged_df$`Report Period`), origin = "1899-12-30")
+merged_df$`Data Period` <- as.Date(as.numeric(merged_df$`Data Period`), origin = "1899-12-30")
+merged_df$`Measurement End Date` <- as.Date(as.numeric(merged_df$`Measurement End Date`), origin = "1899-12-30")
+merged_df$CapPeriodDateFormat <- as.Date(as.numeric(merged_df$CapPeriodDateFormat), origin = "1899-12-30")
+
+# Rename columns with 2023 column names
+merged_df <-
+  merged_df |> 
+  rename(`Gap Status` = Numerator)
+
+# Update numerator values (0,1) to Gap Status values (Open, CLosed)
+merged_df <- merged_df %>%
+  mutate(`Gap Status` = ifelse(`Gap Status` == 0, "OPEN", "CLOSED"))
+
+# Split Member Name into LastName and FirstName
+merged_df <- merged_df %>%
+  separate(`Member Name`, into = c("LastName", "FirstName"), sep = ",")
+
+# Select variables for analysis
+Data_VBPQR_2022_AllRecordsCombined <-
+  merged_df |> 
+  select(
+    `Report Period`,
+    `Data Period`,
+    `Measurement End Date`,
+    `Health Home TIN`,
+    ProviderShortname,
+    `Health Home Name`,
+    `Member ID`,
+    LastName,
+    FirstName,
+    `Measure ID`,
+    `SubMeasure ID`,
+    `SubMeasure Description`,
+    `Gap Status`)
+```
+
+
+
+
+
+
+
+
+
+
+
+
