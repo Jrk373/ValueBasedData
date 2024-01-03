@@ -32,6 +32,8 @@ This report aggregates all VBP QR files into one master file that will be used t
 library(tidyverse)
 library(purrr)
 library(readxl)
+library(stringr)
+library(scales)
 
 # Create provider shortnames based on TIN
 # Create a data frame called ProviderShortnames
@@ -40,20 +42,38 @@ ProviderShortnames <-
   TIN = c("86-0206928", "86-0207499", "86-0214457", "86-0215065", "86-0223720", "86-0250938", "86-0290033", "86-0473221", "94-2880847"),
   ProviderShortname = c("PH", "SHG", "MMHC", "CPIH", "TGC", "LCBHC", "SBHS", "EHS", "CBI")
   )
+
+# Create a list with the ultimate column names for the data
+VBPTrendReport_colnames <- 
+  c("ClaimsAdjudicatedThrough",
+    "AllianceProviderTIN",
+    "ProviderShortname",
+    "HealthHomeName",
+    "MemberID",
+    "LastName",
+    "FirstName",
+    "MeasureID",
+    "Measure",
+    "GapStatus")
+
+ContractMeasures <- c("AMM", "FUH", "FUM", "HDO", "FUA")
+
 ```
 
 # Data Discovery
 
-This data is collected from the BCBSAZ Health Choice health plan on a monthly basis. A separate file is received per provider, per month. The source and quality of this data is already well documented in the VBP Validation for Follow Up After Hospitalization and Anti-depressant Medication Management, so we will not re-iterate it here.
+This data is collected from the BCBSAZ Health Choice health plan on a monthly basis. A separate file is received per provider, per month. The source and quality of this data is already well documented in the VBP Validation for Follow Up After Hospitalization and Anti-depressant Medication Management, so we will not re-iterate it here. ***add references here***
 
 Prior to importing to the model, each VBP Quality Roster data file is copied to a Master Folder containing all Quality Roster reports for all months of the measurement year, for all of the providers.
 
-## Import Data files
+These are excel workbooks and contain multiple sheets of data, of which we need only specific sheets. The names and format of these sheets has varied in composition, name, and location within the file, sometimes appearing as a literal sheet, and sometimes appearing only in the data model view. In addition, the variables' format changed from 2022-2023, requiring a reworking of the data wrangle code. Thus this model is built in two parts, one for 2022, and one for 2023 and on.
 
-These are excel files and require importing of a specific sheet. The name of the sheet has varied in name and location within the file, sometimes appearing a literal sheet, and sometimes appearing only in the data model view. In addition, the format of the file changed from 2022-2023, requiring a reworking of the wrangle code. 
+# Import Measurement Year 2022
+
+## Procedure
 
 ```{r}
-# Function to read Excel files from a folder and its subfolders
+# Create Function to read Excel files from a folder and its subfolders
 read_excel_sheets_as_separate_df <- function(path) {
   # Get list of files in the current directory
   files <- list.files(path = path, full.names = TRUE, recursive = TRUE)
@@ -80,36 +100,42 @@ read_excel_sheets_as_separate_df <- function(path) {
   return(all_dfs)
 }
 
-# Replace './data/Master' with your folder path
-folder_path <- "./data/VBPReports/Master/2022"
+# Set the folder path
+folder_path <- "./data/VBPReports/Master"
 
 # Call the function to read Excel files and sheets as separate data frames
 result_separate_df <- read_excel_sheets_as_separate_df(folder_path)
 
-# Filter list items that end in "_Detail"
+# This result is a list of tibbles that are each individual sheet from the workbook, stored individually from one another. 
+
+# Filter list items that end in "_Detail". This isolates the "Detail" sheet which contains data on each case, including its compliance status.
 filtered_list <- result_separate_df[sapply(names(result_separate_df), function(x) grepl("_Detail$", x))]
 
-# Bind tibbles/data frames into one single data frame
+# Bind tibbles/data frames into one single data frame that contains all of the data from each of the Detail sheets
 combined_df <- bind_rows(filtered_list)
 
-# Filter out rows with NA in the second column
+# Clean and polish data
+
+# The next few steps process each sheet to remove superfluous rows that provide narrative text when viewed in excel, but are not needed for pure data.
+
+# Filter out rows with NA in the second column.
 filtered_combined_df <- 
   combined_df |> 
   filter(!is.na(`...2`))
 
-# Extract values from the first row of filtered_combined_df
+# Extract values from the first row of filtered_combined_df to be used as the column headers
 first_row_values <- unlist(filtered_combined_df[1,])
 
 # Store the values in a list called DetailSheetNames
 DetailSheetNames <- as.list(first_row_values)
 
-# Remove rows where the value in the first column is "LOB"
+# Convert DetailSheetNames to character vector
+DetailSheetNames <- as.character(DetailSheetNames)
+
+# Remove rows where the value in the first column is "LOB". This removes the column headers that was imported from the excel. Several of these column names come in as uninformative data, like "...2".
 filtered_combined_df <- 
   filtered_combined_df |> 
   filter(`Health Choice Arizona (HCA) – Arizona Medicaid` != "LOB")
-
-# Convert DetailSheetNames to character vector
-DetailSheetNames <- as.character(DetailSheetNames)
 
 # Rename columns using values from DetailSheetNames
 names(filtered_combined_df) <- DetailSheetNames
@@ -123,130 +149,35 @@ merged_df$`Data Period` <- as.Date(as.numeric(merged_df$`Data Period`), origin =
 merged_df$`Measurement End Date` <- as.Date(as.numeric(merged_df$`Measurement End Date`), origin = "1899-12-30")
 merged_df$CapPeriodDateFormat <- as.Date(as.numeric(merged_df$CapPeriodDateFormat), origin = "1899-12-30")
 
-# Rename columns with 2023 column names
+# # Update numerator values (0,1) to Gap Status values (Open, Closed). In the 2022 data, HDO data is reverse coded. This is corrected here so that the measures can be viewed consistently.
+# merged_df <- merged_df |>
+#   mutate(`Gap Status` = ifelse(`Measure ID` == "AMM" & `Gap Status` == 0, "OPEN", "CLOSED"))
+
+# Assuming merged_df is your dataframe
+
+merged_df <- merged_df |>
+  mutate(
+    Numerator = case_when(
+      (`Measure ID` %in% c("AMM", "FUH", "FUM") & Numerator == 0) ~ "OPEN",
+      `Measure ID` == "HDO" & Numerator != 0 ~ "CLOSED",
+      TRUE ~ "NA"
+    )
+  )
+
+# Rename columns with 2023 column names. The names of the variables changed from 2022-2023. This process sets the column names to match the newer 2023 format. 
 merged_df <-
   merged_df |> 
   rename(`Gap Status` = Numerator)
 
-# Update numerator values (0,1) to Gap Status values (Open, CLosed)
-merged_df <- merged_df %>%
-  mutate(`Gap Status` = ifelse(`Gap Status` == 0, "OPEN", "CLOSED"))
-
 # Split Member Name into LastName and FirstName
-merged_df <- merged_df %>%
-  separate(`Member Name`, into = c("LastName", "FirstName"), sep = ",")
-
-# Select variables for analysis
-Data_VBPQR_2022_AllRecordsCombined <-
-  merged_df |> 
-  select(
-    `Report Period`,
-    `Data Period`,
-    `Measurement End Date`,
-    `Health Home TIN`,
-    ProviderShortname,
-    `Health Home Name`,
-    `Member ID`,
-    LastName,
-    FirstName,
-    `Measure ID`,
-    `SubMeasure ID`,
-    `SubMeasure Description`,
-    `Gap Status`)
-```
-
-
-```{r}
-# Function to read Excel files from a folder and its subfolders
-read_excel_sheets_as_separate_df <- function(path) {
-  # Get list of files in the current directory
-  files <- list.files(path = path, full.names = TRUE, recursive = TRUE)
-  
-  # Initialize an empty list to store data frames
-  all_dfs <- list()
-  
-  # Loop through each Excel file
-  for (file in files) {
-    if (grepl("\\.xlsx$|\\.xls$", file, ignore.case = TRUE)) {
-      file_name <- basename(file)
-      sheet_names <- excel_sheets(file)
-      
-      # Read each sheet and store as a separate data frame
-      for (sheet in sheet_names) {
-        df_name <- paste0(file_name, "_", sheet)
-        data <- readxl::read_excel(file, sheet = sheet)
-        assign(df_name, data)
-        all_dfs[[df_name]] <- get(df_name)
-      }
-    }
-  }
-  
-  return(all_dfs)
-}
-
-# Replace './data/Master' with your folder path
-folder_path <- "./data/VBPReports/Master/2023"
-
-# Call the function to read Excel files and sheets as separate data frames
-result_separate_df <- read_excel_sheets_as_separate_df(folder_path)
-
-# Filter list items that end in "_Detail"
-filtered_list <- result_separate_df[sapply(names(result_separate_df), function(x) grepl("_Detail$", x))]
-
-# Bind tibbles/data frames into one single data frame
-combined_df <- bind_rows(filtered_list)
-
-# Filter out rows with NA in the second column
-filtered_combined_df <- 
-  combined_df |> 
-  filter(!is.na(`...2`))
-
-# Extract values from the first row of filtered_combined_df
-first_row_values <- unlist(filtered_combined_df[1,])
-
-# Store the values in a list called DetailSheetNames
-DetailSheetNames <- as.list(first_row_values)
-
-# Remove rows where the value in the first column is "LOB"
-filtered_combined_df <- 
-  filtered_combined_df |> 
-  filter(`Health Choice Arizona (HCA) – Arizona Medicaid` != "LOB")
-
-# Convert DetailSheetNames to character vector
-DetailSheetNames <- as.character(DetailSheetNames)
-
-# Rename columns using values from DetailSheetNames
-names(filtered_combined_df) <- DetailSheetNames
-
-# Merge filtered_combined_df with ProviderShortnames based on TIN column
-merged_df <- merge(filtered_combined_df, ProviderShortnames, by.x = "Health Home TIN", by.y = "TIN", all.x = TRUE)
-
-# Convert excel dates to a yyyy-mm-dd format
-merged_df$`Report Period` <- as.Date(as.numeric(merged_df$`Report Period`), origin = "1899-12-30")
-merged_df$`Data Period` <- as.Date(as.numeric(merged_df$`Data Period`), origin = "1899-12-30")
-merged_df$`Measurement End Date` <- as.Date(as.numeric(merged_df$`Measurement End Date`), origin = "1899-12-30")
-merged_df$CapPeriodDateFormat <- as.Date(as.numeric(merged_df$CapPeriodDateFormat), origin = "1899-12-30")
-
-# Rename columns with 2023 column names
-merged_df <-
-  merged_df |> 
-  rename(`Gap Status` = Numerator)
-
-# Update numerator values (0,1) to Gap Status values (Open, CLosed)
-merged_df <- merged_df %>%
-  mutate(`Gap Status` = ifelse(`Gap Status` == 0, "OPEN", "CLOSED"))
-
-# Split Member Name into LastName and FirstName
-merged_df <- merged_df %>%
+merged_df <- merged_df |>
   separate(`Member Name`, into = c("LastName", "FirstName"), sep = ",")
 
 # Select variables for analysis
 Data_VBPQR_2023_Detail <-
   merged_df |> 
   select(
-    `Report Period`,
     `Data Period`,
-    `Measurement End Date`,
     `Health Home TIN`,
     ProviderShortname,
     `Health Home Name`,
@@ -254,56 +185,279 @@ Data_VBPQR_2023_Detail <-
     LastName,
     FirstName,
     `Measure ID`,
-    `SubMeasure ID`,
     `SubMeasure Description`,
     `Gap Status`)
 
-
+# Assuming df is your data frame and VBPTrendReport_colnames is your list of column names
+colnames(Data_VBPQR_2023_Detail) <- VBPTrendReport_colnames
 
 ```
 
-Leaving off here. Somehow, the measurement year, report period, etc. have to be recombined from the Controls sheet with the Roster sheet.
+# Import Measurement Year 2023 and on
+
+## Procedure
+
+The format and structure of the VBP Quality Roster was changed at the beginning of the 2023 Measurement Year. In particular, the variable "Numerator" with binary values (0 and 1) representing compliance was changed to "Gap Status" with values of "OPEN" or "CLOSED". Thus, we have a separate procedure for importing data for the measurement year 2023, and presumable on into the future. Also, in the 2023 format, the "Controls", including report dates, are stored on a separate sheet from the "Roster" which has the case details and compliance status. These 2 sheets must be individually imported, processed, and bound before further analysis is possible.
 
 ```{r}
-# Now do all of that for files with "Roster" as the sheet of interest
+# Set the folder path
+folder_path <- "./data/VBPReports/Master"
 
-# Filter list items that end in "_Roster"
-filtered_list <- result_separate_df[sapply(names(result_separate_df), function(x) grepl("_Roster$", x))]
+# Find files containing "Roster" in their filenames
+roster_files <- list.files(path = folder_path, pattern = "Roster", full.names = TRUE)
 
-# Bind tibbles/data frames into one single data frame
-combined_df_Roster <- bind_rows(filtered_list)
+# Function to read "Roster" and "Controls" sheets from a file and bind them
+bind_roster_controls <- function(file) {
+  # Read sheets "Roster" and "Controls"
+  roster_sheet <- tryCatch(readxl::read_excel(file, sheet = "Roster"), error = function(e) NULL)
+  controls_sheet <- tryCatch(readxl::read_excel(file, sheet = "Controls"), error = function(e) NULL)
+  
+  # Rename "Health Home TIN & Name" column to "Assigned Health Home TIN & Name" in Controls sheet
+  col_index <- which(names(controls_sheet) == "Health Home TIN & Name")
+  if (length(col_index) > 0) {
+    names(controls_sheet)[col_index] <- "Assigned Health Home TIN & Name"
+  }
+  
+  # Check if both sheets are not NULL and have data
+  if (!is.null(roster_sheet) && !is.null(controls_sheet) && !all(is.na(roster_sheet)) && !all(is.na(controls_sheet))) {
+    # Add "Report TIN" column to Roster sheet
+    roster_sheet$`Report TIN` <- substr(basename(file), 1, 10)
+    
+    # Bind sheets and fill missing spaces with NA
+    max_rows <- max(nrow(roster_sheet), nrow(controls_sheet))
+    roster_filled <- bind_rows(roster_sheet, data.frame(matrix(NA, nrow = max_rows - nrow(roster_sheet), ncol = ncol(roster_sheet))))
+    controls_filled <- bind_rows(controls_sheet, data.frame(matrix(NA, nrow = max_rows - nrow(controls_sheet), ncol = ncol(controls_sheet))))
+    
+    # Combine "Roster" and "Controls" sheets
+    combined_data <- cbind(roster_filled, controls_filled)
+    
+    return(combined_data)
+  } else {
+    message("One or both sheets ('Roster' and/or 'Controls') not found or contain no data in file:", file)
+    return(NULL)
+  }
+}
 
-# Filter out rows with NA in the second column
-filtered_combined_df <- 
-  combined_df_Roster |> 
-  filter(!is.na(`...2`))
+# Create an empty list to store combined data from all files
+combined_data_list <- list()
 
-# Extract values from the first row of filtered_combined_df
-first_row_values <- unlist(filtered_combined_df[1,])
+# Iterate through each file in roster_files and store it in "Combined_data_list"
+for (file in roster_files) {
+  combined_data <- bind_roster_controls(file)
+  
+  # Add combined data to the list
+  if (!is.null(combined_data)) {
+    combined_data_list[[file]] <- combined_data
+  }
+}
 
-# Store the values in a list called DetailSheetNames
-RosterSheetNames <- as.list(first_row_values)
+# Iterate through combined_data_list and update columns 19-24 to maintain consistent variable names and populate the Report Date for all cases.
+for (file in names(combined_data_list)) {
+  df <- combined_data_list[[file]]
+  
+  # Check if columns 19-24 have a non-NA first value and fill the entire column
+  for (col in 19:24) {
+    if (!is.na(df[1, col])) {
+      df[, col] <- df[1, col]
+    }
+  }
+  
+  # Update the list with modified dataframe
+  combined_data_list[[file]] <- df
+}
 
+# Combining all rows from all tibbles in combined_data_list
+all_combined_data <- bind_rows(combined_data_list)
 
+# the result of this is a data frame that is the Roster sheet, combined with the Control sheet, for each individual work book, bound together for all of the months for all of the providers.
 
-# Remove rows where the value in the first column is "LOB"
-filtered_combined_df <- 
-  filtered_combined_df |> 
-  filter(`BCBSAZ Health Choice` != "Measure")
+# Clean and polish the data
 
-# Convert DetailSheetNames to character vector
-RosterSheetNames <- as.character(RosterSheetNames)
+# Remove rows with NA in column "...2"
+filtered_all_combined_data <-
+  all_combined_data |> 
+  filter(!is.na(...2))
 
-# Rename columns using values from DetailSheetNames
-names(filtered_combined_df) <- RosterSheetNames
+# Extracting column names from the first row for columns 1-18
+col_names <- as.character(filtered_all_combined_data[1, 1:9])  # Extract column names from the first row for columns 1-18
+
+# Assigning the first row as column headers for columns 1-18 and removing the first row from these columns
+names(filtered_all_combined_data)[1:9] <- col_names  # Assign column names for columns 1-9
+# Remove rows where the column "Measure" has the value "Measure". This removes the original column names.
+filtered_all_combined_data <- filtered_all_combined_data[filtered_all_combined_data$Measure != "Measure", ]
+
+# Select Variables for analysis
+filtered_all_combined_data <-
+  filtered_all_combined_data |> 
+  select(
+    Measure,
+    `Gap Status`,
+    `Member ID`,
+    `Member Age`,
+    `Member Name`,
+    `Health Home TIN & Name`,
+    `Assigned Health Home TIN & Name`,
+    `Report TIN`,
+    MeasurementYearEndDate,
+    ClaimsAdjudicatedDate,
+    CapMonth,
+    LastRefresh
+  )
+
+# split member name into first name/lastname
+filtered_all_combined_data <- filtered_all_combined_data |>
+  separate(`Member Name`, into = c("LastName", "FirstName"), sep = ",", remove = FALSE)  # Splitting "Member Name" column into LastName and FirstName
+
+# Split Health Home TIN into separate columns for each
+filtered_all_combined_data <- filtered_all_combined_data |>
+  separate(`Health Home TIN & Name`, into = c("Health Home TIN", "HealthHomeName"), sep = " ", extra = "merge")  # Splitting column into Health Home TIN and HealthHomeName
+
+# Trim the health home name for extra spaces and characters
+filtered_all_combined_data$HealthHomeName <- substr(filtered_all_combined_data$HealthHomeName, start = 3, stop = nchar(filtered_all_combined_data$HealthHomeName))
+
+# Merge filtered_combined_df with ProviderShortnames based on TIN column
+filtered_all_combined_data <- merge(filtered_all_combined_data, ProviderShortnames, by.x = "Report TIN", by.y = "TIN", all.x = TRUE)
+
+# Extract the first three digits from "Measure" column into a new column "Measure ID"
+filtered_all_combined_data$`Measure ID` <- substr(as.character(filtered_all_combined_data$Measure), 1, 3)
+
+# Remove the first 4 digits from the 'Measure' column
+filtered_all_combined_data$Measure <- substr(filtered_all_combined_data$Measure, start = 7, stop = nchar(filtered_all_combined_data$Measure))
+
+# Select Variables for analysis
+
+Data_VBPQR_2023_Roster <-
+  filtered_all_combined_data |> 
+  select(
+    ClaimsAdjudicatedDate,
+    `Report TIN`,
+    ProviderShortname,
+    HealthHomeName,
+    `Member ID`,
+    LastName,
+    FirstName,
+    `Measure ID`,
+    Measure,
+    `Gap Status`
+  )
+
+# Assuming df is your data frame and VBPTrendReport_colnames is your list of column names
+colnames(Data_VBPQR_2023_Roster) <- VBPTrendReport_colnames
+
 
 ```
 
+# Finalize data set
+
+The 2022 and 2023 data sets are now aggregated, cleaned, and formatted so that they can be combined with one another. This step binds the 2 data frames into one. This step also offers the opportunity to clean up the environment from transitional data that is no longer needed.
+
+```{r}
+
+# Bind the 2022 data to the 2023 and on data
+Data_VBPQR_AllRecords <-
+  rbind(Data_VBPQR_2023_Detail,
+        Data_VBPQR_2023_Roster)
+
+# Clean up the environment from all of the transitional data frames
+
+# List all objects in the environment
+objects_to_keep <- c("Data_VBPQR_AllRecords")  # Add more objects to keep as needed
+
+# Get a list of objects in the environment
+all_objects <- ls()
+
+# Remove objects except for those specified in objects_to_keep
+objects_to_remove <- all_objects[!all_objects %in% objects_to_keep]
+rm(list = objects_to_remove)
+
+```
+
+# Process the data set
+
+Now that all of the data is formatted and combined, we will need to trim it down to contract measures only.
+
+```{r}
+
+# Filter the data for only contract required and prospective measures.
+Data_VBPQR_AllRecords <-
+  Data_VBPQR_AllRecords |> 
+  filter(MeasureID %in% ContractMeasures)
+
+# Write to CSV
+
+write.csv(Data_VBPQR_AllRecords, "./data/output/Data_VBPQR_AllRecords.csv")
+```
+
+# Begin the analysis
+
+```{r}
+
+# Creating a table that counts occurrences of "OPEN" and "CLOSED" per group
+counts_table <- 
+  Data_VBPQR_AllRecords |>
+  group_by(ClaimsAdjudicatedThrough, ProviderShortname, MeasureID) |>
+  summarise(
+    Open_Count = sum(GapStatus == "OPEN", na.rm = TRUE),
+    Closed_Count = sum(GapStatus == "CLOSED", na.rm = TRUE),
+    Total_Count = Open_Count + Closed_Count
+  ) |>
+  mutate(
+    Percentage_Closed = scales::percent(Closed_Count / Total_Count, accuracy = 0.01)
+  )
+
+```
+
+```{r}
+
+# Convert Percentage_Closed to numeric without "%" sign
+counts_table$Percentage_Closed <- as.numeric(gsub("%", "", counts_table$Percentage_Closed))
+
+# Create separate line charts for Percentage_Closed over ClaimsAdjudicatedThrough per ProviderShortname for each MeasureID
+plots_list <- list()
+
+for (measure_id in unique(counts_table$MeasureID)) {
+  plot_data <- counts_table |>
+    filter(MeasureID == measure_id)
+  
+  # Check if Percentage_Closed column is a character type, convert it to numeric
+  if (class(plot_data$Percentage_Closed) == "character") {
+    plot_data$Percentage_Closed <- as.numeric(gsub("%", "", plot_data$Percentage_Closed))
+  }
+  
+  plot <- ggplot(plot_data, aes(x = ClaimsAdjudicatedThrough, y = Percentage_Closed, group = ProviderShortname)) +
+    geom_line(aes(color = ProviderShortname), size = 1) +
+    labs(
+      title = paste("Percentage Closed over Time per Provider for Measure ID", measure_id),
+      x = "Claims Adjudicated Through",
+      y = "Percentage Closed"
+    ) +
+    theme_minimal() +
+    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 10)) +
+    geom_hline(yintercept = c(57, 45, 35, 93), linetype = "dashed", color = "red")
+  
+  plots_list[[paste0("Plot_", measure_id)]] <- plot
+}
+
+# Show the separate line plots for each MeasureID
+plots_list
+
+```
+
+```{r}
+library(ggplot2)
+
+# Creating a table that counts occurrences of "OPEN" and "CLOSED" per group
+counts_table <- Data_VBPQR_AllRecords |>
+  group_by(ClaimsAdjudicatedThrough, MeasureID) |>
+  summarise(
+    Open_Count = sum(GapStatus == "OPEN", na.rm = TRUE),
+    Closed_Count = sum(GapStatus == "CLOSED", na.rm = TRUE),
+    Total_Count = Open_Count + Closed_Count
+  ) |>
+  mutate(
+    Percentage_Closed = scales::percent(Closed_Count / Total_Count, accuracy = 0.01)
+  )
 
 
 
-
-
-
-
-
+```
