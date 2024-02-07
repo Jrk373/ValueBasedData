@@ -21,6 +21,8 @@ format:
 
 This report aggregates all VBP QR files into one master file that will be used to assess baseline and performance levels across measures and providers.
 
+# Setup
+
 ```{r}
 #| label: Setup
 #| include: false
@@ -368,7 +370,7 @@ all_objects <- ls()
 
 # Remove objects except for those specified in objects_to_keep
 objects_to_remove <- all_objects[!all_objects %in% objects_to_keep]
-rm(list = objects_to_remove)
+# rm(list = objects_to_remove)
 
 ```
 
@@ -384,8 +386,9 @@ Data_VBPQR_AllRecords <-
   filter(MeasureID %in% ContractMeasures)
 
 # Write to CSV
-
 write.csv(Data_VBPQR_AllRecords, "./data/output/Data_VBPQR_AllRecords.csv")
+
+# Run power automate to copy this file to Alliance Intranet Support folder
 ```
 
 # Begin the analysis
