@@ -36,6 +36,7 @@ library(purrr)
 library(readxl)
 library(stringr)
 library(scales)
+library(lubridate)
 
 # Create provider shortnames based on TIN
 # Create a data frame called ProviderShortnames
@@ -151,25 +152,26 @@ merged_df$`Data Period` <- as.Date(as.numeric(merged_df$`Data Period`), origin =
 merged_df$`Measurement End Date` <- as.Date(as.numeric(merged_df$`Measurement End Date`), origin = "1899-12-30")
 merged_df$CapPeriodDateFormat <- as.Date(as.numeric(merged_df$CapPeriodDateFormat), origin = "1899-12-30")
 
+# Filter for contract measures
+merged_df <- 
+  merged_df |> 
+  filter(`Measure ID` %in% ContractMeasures)
+
+
 # # Update numerator values (0,1) to Gap Status values (Open, Closed). In the 2022 data, HDO data is reverse coded. This is corrected here so that the measures can be viewed consistently.
-# merged_df <- merged_df |>
-#   mutate(`Gap Status` = ifelse(`Measure ID` == "AMM" & `Gap Status` == 0, "OPEN", "CLOSED"))
 
 # Assuming merged_df is your dataframe
 
 merged_df <- merged_df |>
   mutate(
-    Numerator = case_when(
-      (`Measure ID` %in% c("AMM", "FUH", "FUM") & Numerator == 0) ~ "OPEN",
-      `Measure ID` == "HDO" & Numerator != 0 ~ "CLOSED",
-      TRUE ~ "NA"
-    )
-  )
+    `Gap Status` = if_else(`Measure ID` == "AMM" & Numerator == 1, "CLOSED",
+                           if_else(`Measure ID` == "FUH" & Numerator == 1, "CLOSED",
+                                   if_else(`Measure ID` == "FUM" & Numerator == 1, "CLOSED",
+                                           if_else(`Measure ID` == "HDO" & Numerator == 1, "OPEN", 
+                                                   if_else(`Measure ID` == "HDO" & Numerator == 0, "CLOSED", "OPEN"))))))
+      
+      
 
-# Rename columns with 2023 column names. The names of the variables changed from 2022-2023. This process sets the column names to match the newer 2023 format. 
-merged_df <-
-  merged_df |> 
-  rename(`Gap Status` = Numerator)
 
 # Split Member Name into LastName and FirstName
 merged_df <- merged_df |>
@@ -271,6 +273,11 @@ for (file in names(combined_data_list)) {
 # Combining all rows from all tibbles in combined_data_list
 all_combined_data <- bind_rows(combined_data_list)
 
+# Fill down the values in the 'CapMonth' column
+all_combined_data <- all_combined_data %>%
+  fill(CapMonth, .direction = "down")
+
+
 # the result of this is a data frame that is the Roster sheet, combined with the Control sheet, for each individual work book, bound together for all of the months for all of the providers.
 
 # Clean and polish the data
@@ -280,13 +287,23 @@ filtered_all_combined_data <-
   all_combined_data |> 
   filter(!is.na(...2))
 
-# Extracting column names from the first row for columns 1-18
+# Extracting column names from the first row for columns 1-8
 col_names <- as.character(filtered_all_combined_data[1, 1:9])  # Extract column names from the first row for columns 1-18
 
 # Assigning the first row as column headers for columns 1-18 and removing the first row from these columns
 names(filtered_all_combined_data)[1:9] <- col_names  # Assign column names for columns 1-9
 # Remove rows where the column "Measure" has the value "Measure". This removes the original column names.
 filtered_all_combined_data <- filtered_all_combined_data[filtered_all_combined_data$Measure != "Measure", ]
+
+# Change 'CapMonth' to the last day of the prior month
+filtered_all_combined_data <- filtered_all_combined_data %>%
+  mutate(CapMonth = lubridate::floor_date(CapMonth, "month") - 1,
+         CapMonth = format(CapMonth, "%Y-%m-%d"))
+
+# Replace the claims adjudicated date with the capmonth date
+filtered_all_combined_data <-
+  filtered_all_combined_data |> 
+  mutate(ClaimsAdjudicatedDate = CapMonth)
 
 # Select Variables for analysis
 filtered_all_combined_data <-
@@ -325,6 +342,9 @@ filtered_all_combined_data$`Measure ID` <- substr(as.character(filtered_all_comb
 
 # Remove the first 4 digits from the 'Measure' column
 filtered_all_combined_data$Measure <- substr(filtered_all_combined_data$Measure, start = 7, stop = nchar(filtered_all_combined_data$Measure))
+
+# Remove the first 3 digits from the 'Member ID' column
+filtered_all_combined_data$`Member ID` <- substring(filtered_all_combined_data$`Member ID`, 4)
 
 # Select Variables for analysis
 
@@ -370,7 +390,7 @@ all_objects <- ls()
 
 # Remove objects except for those specified in objects_to_keep
 objects_to_remove <- all_objects[!all_objects %in% objects_to_keep]
-# rm(list = objects_to_remove)
+#rm(list = objects_to_remove)
 
 ```
 
@@ -379,11 +399,6 @@ objects_to_remove <- all_objects[!all_objects %in% objects_to_keep]
 Now that all of the data is formatted and combined, we will need to trim it down to contract measures only.
 
 ```{r}
-
-# Filter the data for only contract required and prospective measures.
-Data_VBPQR_AllRecords <-
-  Data_VBPQR_AllRecords |> 
-  filter(MeasureID %in% ContractMeasures)
 
 # Write to CSV
 write.csv(Data_VBPQR_AllRecords, "./data/output/Data_VBPQR_AllRecords.csv")
@@ -405,62 +420,29 @@ counts_table <-
     Total_Count = Open_Count + Closed_Count
   ) |>
   mutate(
-    Percentage_Closed = scales::percent(Closed_Count / Total_Count, accuracy = 0.01)
-  )
+    Percentage_Closed = Closed_Count / Total_Count, accuracy = 0.01
+  ) |> 
+  mutate(Target = if_else(MeasureID == "AMM", .5729,
+                          if_else(MeasureID == "FUH", .3900,
+                                  if_else(MeasureID == "FUM", .5750,
+                                          if_else(MeasureID == "HDO", .93,
+                                                  0))))) |> 
+  mutate(HPBenchmark = if_else(MeasureID == "AMM", .6040,
+                          if_else(MeasureID == "FUH", .4600,
+                                  if_else(MeasureID == "FUM", .5040,
+                                          if_else(MeasureID == "HDO", .93,
+                                                  0))))) |> 
+  mutate(Performance_Target = Percentage_Closed - Target) |> 
+  mutate(Performance_HPBenchmark = Percentage_Closed - HPBenchmark)
+
+
+
+# Write to csv
+write.csv(counts_table, "./data/output/VBPQR_Alliance_AllMeasures.csv")
 
 ```
 
 ```{r}
-
-# Convert Percentage_Closed to numeric without "%" sign
-counts_table$Percentage_Closed <- as.numeric(gsub("%", "", counts_table$Percentage_Closed))
-
-# Create separate line charts for Percentage_Closed over ClaimsAdjudicatedThrough per ProviderShortname for each MeasureID
-plots_list <- list()
-
-for (measure_id in unique(counts_table$MeasureID)) {
-  plot_data <- counts_table |>
-    filter(MeasureID == measure_id)
-  
-  # Check if Percentage_Closed column is a character type, convert it to numeric
-  if (class(plot_data$Percentage_Closed) == "character") {
-    plot_data$Percentage_Closed <- as.numeric(gsub("%", "", plot_data$Percentage_Closed))
-  }
-  
-  plot <- ggplot(plot_data, aes(x = ClaimsAdjudicatedThrough, y = Percentage_Closed, group = ProviderShortname)) +
-    geom_line(aes(color = ProviderShortname), size = 1) +
-    labs(
-      title = paste("Percentage Closed over Time per Provider for Measure ID", measure_id),
-      x = "Claims Adjudicated Through",
-      y = "Percentage Closed"
-    ) +
-    theme_minimal() +
-    scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 10)) +
-    geom_hline(yintercept = c(57, 45, 35, 93), linetype = "dashed", color = "red")
-  
-  plots_list[[paste0("Plot_", measure_id)]] <- plot
-}
-
-# Show the separate line plots for each MeasureID
-plots_list
-
-```
-
-```{r}
-library(ggplot2)
-
-# Creating a table that counts occurrences of "OPEN" and "CLOSED" per group
-counts_table <- Data_VBPQR_AllRecords |>
-  group_by(ClaimsAdjudicatedThrough, MeasureID) |>
-  summarise(
-    Open_Count = sum(GapStatus == "OPEN", na.rm = TRUE),
-    Closed_Count = sum(GapStatus == "CLOSED", na.rm = TRUE),
-    Total_Count = Open_Count + Closed_Count
-  ) |>
-  mutate(
-    Percentage_Closed = scales::percent(Closed_Count / Total_Count, accuracy = 0.01)
-  )
-
 
 
 ```
